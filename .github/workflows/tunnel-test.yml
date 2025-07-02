@@ -1,0 +1,83 @@
+name: backend test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres
+        env:
+          POSTGRES_USER: hossein
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: customer
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    defaults:
+      run:
+        working-directory: backend/spring
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: HKH-soft/netpick
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'maven'
+
+      - name: Build the project
+        run: |
+          mvn package
+          pwd
+
+      - name: Run Spring Boot app
+        run: |
+          java -jar target/*.jar &
+      - name: Install and run cloudflared
+        run: |
+          # Check if token is set
+          if [ -z "${{ secrets.CLOUDFLARED_TOKEN }}" ]; then
+            echo "❌ CLOUDFLARED_TOKEN is not set"
+            exit 1
+          fi
+
+          sudo mkdir -p --mode=0755 /usr/share/keyrings
+          curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y cloudflared
+
+          export TUNNEL_TOKEN="${{ secrets.CLOUDFLARED_TOKEN }}"
+          cloudflared tunnel run >/dev/null 2>&1 &
+          TUNNEL_PID=$!
+          sleep 10
+
+          if ps -p $TUNNEL_PID >/dev/null; then
+            echo "✅ Cloudflared tunnel started successfully"
+            while ps -p $TUNNEL_PID >/dev/null; do sleep 60; done
+            echo "❌ Tunnel unexpectedly stopped"
+            exit 1
+          else
+            echo "❌ Failed to start cloudflared tunnel"
+            exit 1
+          fi
+
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+
+      - name: Wait for "stop" command via SSH
+        run: |
+          echo "🛑 Workflow is now waiting for a stop command..."
+          echo "🔧 Run 'touch stop' in this SSH session to end it."
+          while [ ! -f stop ]; do sleep 5; done
